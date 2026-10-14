@@ -2,6 +2,7 @@ from collections.abc import Iterator, Sequence
 import logging
 import multiprocessing
 import os
+import pathlib
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
@@ -137,9 +138,18 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    # 优先从本地 datasets/ 目录加载（官方逻辑默认只查 HuggingFace Hub）。
+    local_path = pathlib.Path.cwd() / "datasets" / repo_id
+    root = str(local_path) if local_path.exists() else None
+    if root is not None:
+        logging.info(f"Loading local dataset: {local_path}")
+    else:
+        logging.info(f"Dataset {repo_id} not found in datasets/, trying HuggingFace Hub")
+
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=root)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
+        root=root,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },

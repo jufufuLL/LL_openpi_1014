@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.llbot_policy as llbot_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -262,6 +263,65 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
         )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotLLbotDataConfig(DataConfigFactory):
+    """LLbot机器人数据配置
+
+    数据集（LeRobot 格式）关键字段：
+    - observation.state / action: 20维 = 左臂8 + 右臂8 + 左夹爪 + 右夹爪 + head_pan + head_tilt
+    - 图像: observation.images.stereo_left_eye / stereo_right_eye / right_hand
+    - 任务描述: task（经 prompt_from_task 注入为 prompt）
+    """
+
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = None
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "stereo_left_eye": "observation.images.stereo_left_eye",
+                            "stereo_right_eye": "observation.images.stereo_right_eye",
+                            "right_hand": "observation.images.right_hand",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[llbot_policy.LLbotInputs()],
+            outputs=[llbot_policy.LLbotOutputs()],
+        )
+
+        if self.use_delta_joint_actions:
+            # 数据布局实际是 [左臂8, 右臂8, 左夹爪, 右夹爪, head_pan, head_tilt]
+            delta_action_mask = _transforms.make_bool_mask(8, 8, -1, -1, 2)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -760,6 +820,37 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    #
+    # Fine-tuning LLbot configs.
+    #
+    # 新机器人 LLbot（20维双臂+头部，3路相机）LoRA 低显存微调配置。
+    # 数据集需放在 openpi/datasets/<repo_id>（或 HF_LEROBOT_HOME）下。
+    TrainConfig(
+        name="pi05_llbot_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLLbotDataConfig(
+            repo_id="test_1012",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(asset_id="test_1012"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=10_000,
+        batch_size=16,
+        log_interval=50,
+        save_interval=2500,
+        keep_period=2500,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
     ),
     #
     # Fine-tuning Aloha configs.
