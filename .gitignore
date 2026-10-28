@@ -170,3 +170,4 @@ cython_debug/
 # 预训练权重缓存目录（openpi.shared.download 默认下载到此）
 models/
 datasets/
+checkpoints/
